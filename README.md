@@ -1,5 +1,7 @@
 # Go Load Balancer & Distributed Rate Limiter
 
+[![CI](https://github.com/cabasoah/Distributed-Job-Scheduler-with-Rate-Limiting/actions/workflows/ci.yml/badge.svg)](https://github.com/cabasoah/Distributed-Job-Scheduler-with-Rate-Limiting/actions/workflows/ci.yml)
+
 Two small network services written in Go from first principles:
 
 - a **round-robin HTTP load balancer** with background health checks, and
@@ -15,7 +17,7 @@ Scaling out creates a second problem: with an in-memory counter, each instance o
 
 ## What's implemented
 
-### Load balancer (`cmd/lb`, `loadbalancer/`)
+### Load balancer (`cmd/loadbalancer`, `loadbalancer/`)
 
 - Round-robin distribution across a configurable backend list
 - Round-robin index guarded by a `sync.Mutex` (many request goroutines pick backends concurrently)
@@ -24,11 +26,11 @@ Scaling out creates a second problem: with an in-memory counter, each instance o
 - Concurrent request handling (one goroutine per connection via `net/http`)
 - `503` if no healthy backend exists, `502` if forwarding to a chosen backend fails
 
-### Rate limiter (`cmd/rl`, `ratelimiter/`)
+### Rate limiter (`cmd/ratelimiter`, `ratelimiter/`)
 
 Every algorithm implements the same one-method interface (`Allow(key string) bool`) and is selected with `--strategy`. The key is the client IP (port stripped). Rejected requests get HTTP `429 Too Many Requests`.
 
-| `--strategy` | Algorithm | Parameters (set in `cmd/rl/main.go`) | State |
+| `--strategy` | Algorithm | Parameters (set in `cmd/ratelimiter/main.go`) | State |
 |---|---|---|---|
 | `token-bucket` | Token bucket, one bucket per IP | capacity 10, refill 1 token/sec | in-process |
 | `fixed-window` | Fixed window counter | 60 requests per 60 s window | in-process |
@@ -47,7 +49,7 @@ The challenge's sliding window log step was intentionally skipped.
 flowchart LR
     Client([Client])
 
-    subgraph LBSYS["Load balancer (cmd/lb)"]
+    subgraph LBSYS["Load balancer (cmd/loadbalancer)"]
         Proxy["HTTP proxy<br/>round robin"]
         Pool[("Backend pool<br/>mutex-guarded index,<br/>atomic alive flags")]
         Health["Health checker<br/>background goroutine"]
@@ -55,13 +57,13 @@ flowchart LR
         Health -.->|"flips alive flag"| Pool
     end
 
-    subgraph BACKENDS["Backends (cmd/be or any HTTP server)"]
+    subgraph BACKENDS["Backends (cmd/backend or any HTTP server)"]
         B1["Backend :8080"]
         B2["Backend :8081"]
         B3["Backend :8082"]
     end
 
-    subgraph RLSYS["Rate limiter (cmd/rl)"]
+    subgraph RLSYS["Rate limiter (cmd/ratelimiter)"]
         RL1["Instance :8083"]
         RL2["Instance :8084"]
         Redis[("Redis<br/>per-client window counters")]
@@ -87,9 +89,9 @@ The two subsystems currently run as **independent processes**. Putting the rate 
 ```
 .
 ├── cmd/
-│   ├── lb/main.go        # load balancer entrypoint
-│   ├── be/main.go        # tiny test backend
-│   └── rl/main.go        # rate limiter API server
+│   ├── loadbalancer/main.go   # load balancer entrypoint
+│   ├── backend/main.go        # tiny test backend
+│   └── ratelimiter/main.go    # rate limiter API server
 ├── loadbalancer/
 │   └── pool.go           # backend pool, round robin, health checks
 ├── ratelimiter/
@@ -97,18 +99,21 @@ The two subsystems currently run as **independent processes**. Putting the rate 
 │   ├── tokenbucket.go
 │   ├── fixedwindow.go
 │   ├── slidingwindowcounter.go
-│   └── redis_sliding_window.go
+│   ├── redisslidingwindow.go
+│   ├── limiter_test.go               # tests for the in-memory algorithms
+│   └── redisslidingwindow_test.go    # tests against a real Redis
+├── .github/workflows/ci.yml   # vet + go test -race with a Redis service
 ├── docker-compose.yml    # Redis
 └── go.mod
 ```
 
 ## Getting started
 
-**Prerequisites:** Go 1.21+ (uses the built-in `min` and `atomic.Bool`), Docker (for Redis), and `curl`.
+**Prerequisites:** Go 1.27+ (the version `go.mod` requires), Docker (for Redis), and `curl`.
 
 ```bash
-git clone https://github.com/<your-username>/<repo-name>.git
-cd <repo-name>
+git clone https://github.com/cabasoah/Distributed-Job-Scheduler-with-Rate-Limiting.git
+cd Distributed-Job-Scheduler-with-Rate-Limiting
 go mod download
 ```
 
@@ -118,12 +123,12 @@ Use one terminal per process.
 
 ```bash
 # terminals 1-3: three backends
-go run ./cmd/be --port 8080
-go run ./cmd/be --port 8081
-go run ./cmd/be --port 8082
+go run ./cmd/backend --port 8080
+go run ./cmd/backend --port 8081
+go run ./cmd/backend --port 8082
 
 # terminal 4: the load balancer
-go run ./cmd/lb --port 9090 \
+go run ./cmd/loadbalancer --port 9090 \
   --backends http://localhost:8080,http://localhost:8081,http://localhost:8082 \
   --health-path / --health-period 5s
 
@@ -138,23 +143,40 @@ Flags: `--port` (default `9090`), `--backends`, `--health-path` (default `/`), `
 ### Run the rate limiter
 
 ```bash
-go run ./cmd/rl --port 8083 --strategy token-bucket
+go run ./cmd/ratelimiter --port 8083 --strategy token-bucket
 curl http://127.0.0.1:8083/unlimited
 curl http://127.0.0.1:8083/limited
 ```
 
-Flags: `--port` (default `8080`, so pass a different port if your backends are using it), `--strategy`, `--redis-addr` (default `localhost:6379`).
+Flags: `--port` (default `8083`), `--strategy`, `--redis-addr` (default `localhost:6379`).
 
 ### Run the distributed (Redis) rate limiter
 
 ```bash
 docker-compose up -d        # or: docker compose up -d
 
-go run ./cmd/rl --port 8083 --strategy redis-sliding-window
-go run ./cmd/rl --port 8084 --strategy redis-sliding-window
+go run ./cmd/ratelimiter --port 8083 --strategy redis-sliding-window
+go run ./cmd/ratelimiter --port 8084 --strategy redis-sliding-window
 ```
 
-## Verifying behavior
+## Tests
+
+```bash
+docker compose up -d     # Redis, for the Redis limiter tests
+go test -race ./...      # -race needs cgo (a C compiler)
+```
+
+Each algorithm has tests in [`ratelimiter/`](ratelimiter/). The limiters take an injectable clock, so the tests check window and refill behaviour to the second without sleeping. They cover:
+
+- **Token bucket:** starts full, refills at the configured rate, caps at capacity.
+- **Fixed window:** resets at the window edge, and the known 2× burst across that edge.
+- **Sliding window counter:** the weighted estimate, blocking that same boundary burst, and recovery after a long idle period.
+- **Redis sliding window:** the same estimate against a real Redis, and two limiter instances sharing one limit.
+- **Concurrency:** 200 concurrent requests against each in-memory limiter allow exactly the limit, run under the race detector.
+
+The Redis tests skip themselves locally when Redis isn't running. In CI they must run: the [GitHub Actions workflow](.github/workflows/ci.yml) starts a Redis service and runs `go vet` and `go test -race` on every push and pull request.
+
+## Verifying behavior manually
 
 Fire 10 concurrent requests (Git Bash / Linux / macOS):
 
@@ -187,8 +209,6 @@ docker-compose exec redis redis-cli FLUSHALL
 
 **Load balancer failover:** kill one backend, wait one `--health-period`, and confirm the load balancer logs the backend being taken out of rotation and requests keep succeeding on the rest. Restart the backend and it rejoins after the next check.
 
-All testing so far has been manual with `curl`.
-
 ## Design notes
 
 - **Mutex vs atomic.** The round-robin index and the backend list are related state, so they sit behind a `sync.Mutex`. Each backend's alive flag is one independent value, so it is an `atomic.Bool`.
@@ -203,7 +223,7 @@ All testing so far has been manual with `curl`.
 - **It fails open if Redis is unreachable.** Redis errors are not handled, so a failed read returns a count of 0 and requests are allowed through.
 - **In-process limiters never evict idle clients.** Their per-IP maps grow with the number of distinct clients seen.
 - **Clients are identified by `RemoteAddr`.** Behind any proxy, including this repo's load balancer, every request would appear to come from the proxy's IP unless the proxy forwards the real client address (for example via `X-Forwarded-For`), which this repo does not do. Locally, every `curl` comes from the same loopback address, so you cannot simulate multiple clients.
-- **Strategy parameters are constants in `cmd/rl/main.go`**, not flags.
+- **Strategy parameters are constants in `cmd/ratelimiter/main.go`**, not flags.
 
 **Load balancer**
 
@@ -214,13 +234,13 @@ All testing so far has been manual with `curl`.
 **General**
 
 - The rate limiter and load balancer are not chained together yet.
-- No automated tests; verification is manual.
+- Automated tests cover the rate limiter only; the load balancer is still verified manually.
 
 ## Possible next steps
 
 - Chain the two: rate limiter as middleware in front of the load balancer
 - Make the Redis check-and-increment atomic with a Lua script, and decide on fail-open vs fail-closed behavior
-- Automated tests with Go's `testing` package and the race detector (`go test -race ./...`)
+- Tests for the load balancer (round robin, health checks, `502`/`503` paths) using `httptest`
 - Switch the proxy to `httputil.ReverseProxy`, add timeouts, forward client IP
 - Run the whole stack from `docker-compose.yml`
 - Implement the sliding window log algorithm and compare its memory cost against the counter

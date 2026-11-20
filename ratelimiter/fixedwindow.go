@@ -11,6 +11,7 @@ type FixedWindowLimiter struct {
 	currentWindow map[string]int64
 	windowSize time.Duration
 	threshold int
+	now func() time.Time // swapped out in tests
 }
 
 func NewFixedWindowLimiter(windowSize time.Duration, threshold int) *FixedWindowLimiter {
@@ -19,6 +20,7 @@ func NewFixedWindowLimiter(windowSize time.Duration, threshold int) *FixedWindow
 		currentWindow: make(map[string]int64),
 		windowSize: windowSize,
 		threshold: threshold,
+		now: time.Now,
 	}
 }
 
@@ -26,7 +28,7 @@ func (l *FixedWindowLimiter) Allow(key string) bool  {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	window := time.Now().Unix() / int64(l.windowSize.Seconds())
+	window := l.now().Unix() / int64(l.windowSize.Seconds())
 
 	if l.currentWindow[key] != window {
 		l.currentWindow[key] = window

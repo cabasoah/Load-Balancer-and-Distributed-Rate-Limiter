@@ -29,9 +29,10 @@ func main()  {
 		handleRequest(w, r, pool)
 	})
 
+	pool.StartHealthChecks(*healthPath, *healthPeriod)
+
 	log.Printf("Load balancer listening on :%s", *port)
 	log.Fatal(http.ListenAndServe(":"+*port, nil))
-	pool.StartHealthChecks(*healthPath, *healthPeriod)
 
 }
 

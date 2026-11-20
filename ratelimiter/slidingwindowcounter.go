@@ -16,6 +16,7 @@ type SlidingWindowCounterLimiter struct{
 	windows map[string]*windowCounts
 	windowSize time.Duration
 	threshold int
+	now func() time.Time // swapped out in tests
 }
 
 func NewSlidingWindowCounterLimiter(windowSize time.Duration, threshold int) *SlidingWindowCounterLimiter  {
@@ -23,6 +24,7 @@ func NewSlidingWindowCounterLimiter(windowSize time.Duration, threshold int) *Sl
 		windows: make(map[string]*windowCounts),
 		windowSize: windowSize,
 		threshold: threshold,
+		now: time.Now,
 	}
 }
 
@@ -31,7 +33,7 @@ func (l *SlidingWindowCounterLimiter) Allow(key string) bool  {
 	defer l.mu.Unlock()
 
 	windowSecs := int64(l.windowSize.Seconds())
-	now := time.Now()
+	now := l.now()
 	nowWindow := now.Unix() / windowSecs
 
 	wc, exists := l.windows[key]
@@ -48,9 +50,9 @@ func (l *SlidingWindowCounterLimiter) Allow(key string) bool  {
 		wc.previousCount, wc.currentCount = wc.currentCount, 0
 		wc.currentWindow = nowWindow
 	default:
-		//gap of more than one window -  both counts are stable
+		//gap of more than one window -  both counts are stale
 		wc.previousCount, wc.currentCount = 0, 0
-		wc.currentCount = int(nowWindow)
+		wc.currentWindow = nowWindow
 	}
 
 	elapsed := float64(now.Unix()%windowSecs) / float64(windowSecs)

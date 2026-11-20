@@ -13,19 +13,21 @@ type RedisSlidingWindowLimiter struct {
 	client     *redis.Client
 	windowSize time.Duration
 	threshold  int
+	now        func() time.Time // swapped out in tests
 }
 
 func NewRedisSlidingWindowLimiter(client *redis.Client, windowSize time.Duration, threshold int) *RedisSlidingWindowLimiter {
 	return &RedisSlidingWindowLimiter{
 		client: client,
 		windowSize: windowSize,
-		threshold: threshold}
+		threshold: threshold,
+		now: time.Now}
 }
 
 func (l *RedisSlidingWindowLimiter) Allow(key string) bool {
 	ctx := context.Background()
 	windowSecs := int64(l.windowSize.Seconds())
-	now := time.Now().Unix()
+	now := l.now().Unix()
 	nowWindow := now / windowSecs
 
 	currentKey := fmt.Sprintf("rl:%s:%d", key, nowWindow)
